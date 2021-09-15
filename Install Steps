@@ -1,0 +1,174 @@
+
+3 VM's
+	- DB Server 
+	- Web Server
+	- HA Proxy
+
+Tested using CentOS 7 image in HPOC
+
+Deploy all of the VM's from the CentOS VM - Cloned 3 times
+
+Database Server 1st
+cd /tmp
+vi db.sh
+
+Paste the following into the db.sh file
+#!/bin/bash
+set -ex
+sudo yum install -y "http://repo.mysql.com/mysql-community-release-el7-5.noarch.rpm"
+#sudo yum update -y
+sudo setenforce 0
+sudo sed -i 's/enforcing/disabled/g' /etc/selinux/config /etc/selinux/config
+sudo systemctl stop firewalld || true
+sudo systemctl disable firewalld || true
+sudo yum install -y mysql-community-server.x86_64
+sudo /bin/systemctl start mysqld
+sudo /bin/systemctl enable mysqld
+#Mysql secure installation
+mysql -u root<<-EOF
+UPDATE mysql.user SET Password=PASSWORD('nutanix/4u') WHERE User='root';
+DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+DELETE FROM mysql.user WHERE User='';
+DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%';
+FLUSH PRIVILEGES;
+EOF
+mysql -u root -pnutanix/4u <<-EOF
+CREATE DATABASE homestead;
+GRANT ALL PRIVILEGES ON homestead.* TO 'homestead'@'%' identified by 'secret';
+FLUSH PRIVILEGES;
+EOF
+
+chmod 777 db.sh
+./db.sh
+
+
+Web Server 2nd
+
+sudo yum -y install epel-release
+sudo setenforce 0
+sudo sed -i 's/enforcing/disabled/g' /etc/selinux/config /etc/selinux/config
+sudo systemctl stop firewalld || true
+sudo systemctl disable firewalld || true
+sudo rpm -Uvh https://mirror.webtatic.com/yum/el7/webtatic-release.rpm
+
+Update the epel.repo's file (/etc/yum.repos.d/) - change the baseurl in the 1st block to use the baseurl instead of the mirror url (just swap the # to comment our mirror instead of baseurl)
+
+sudo yum install -y nginx php56w-fpm php56w-cli php56w-mcrypt php56w-mysql php56w-mbstring php56w-dom git unzip curl
+cd /tmp
+vi web.sh
+Paste the following into the web.sh file - update DB server IP
+
+#!/bin/bash
+set -ex
+sudo mkdir -p /var/www/laravel
+echo "server {
+ listen 80 default_server;
+ listen [::]:80 default_server ipv6only=on;
+root /var/www/laravel/public/;
+ index index.php index.html index.htm;
+location / {
+ try_files \$uri \$uri/ /index.php?\$query_string;
+ }
+ # pass the PHP scripts to FastCGI server listening on /var/run/php5-fpm.sock
+ location ~ \.php$ {
+ try_files \$uri /index.php =404;
+ fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+ fastcgi_pass 127.0.0.1:9000;
+ fastcgi_index index.php;
+ fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+ include fastcgi_params;
+ }
+}" | sudo tee /etc/nginx/conf.d/laravel.conf
+sudo sed -i 's/80 default_server/80/g' /etc/nginx/nginx.conf
+if `grep "cgi.fix_pathinfo" /etc/php.ini` ; then
+ sudo sed -i 's/cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' /etc/php.ini
+else
+ sudo sed -i 's/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' /etc/php.ini
+fi
+sudo systemctl enable php-fpm
+sudo systemctl enable nginx
+sudo systemctl restart php-fpm
+sudo systemctl restart nginx
+if [ ! -e /usr/local/bin/composer ]
+then
+ curl -sS https://getcomposer.org/installer | php
+ sudo mv composer.phar /usr/local/bin/composer
+ sudo chmod +x /usr/local/bin/composer
+fi
+sudo git clone https://github.com/ideadevice/quickstart-basic.git /var/www/laravel
+sudo sed -i 's/DB_HOST=.*/DB_HOST=10.42.35.53/' /var/www/laravel/.env
+sudo su - -c "cd /var/www/laravel; composer install"
+sudo su - -c "cd /var/www/laravel; php artisan migrate"
+fi
+
+chmod 777 web.sh
+./web.sh
+
+sudo chown -R nginx:nginx /var/www/laravel
+sudo chmod -R 777 /var/www/laravel/
+sudo systemctl restart nginx
+
+Note: if this fails to run check where it stops and troubleshoot - epel base url as above and if curl is installed
+
+
+HAProxy 3rd
+
+cd /tmp
+vi haproxy.sh
+Paste the following into the web.sh file - update Web server IP
+
+#!/bin/bash
+set -ex
+#sudo yum update -y
+sudo yum install -y haproxy
+sudo setenforce 0
+sudo sed -i 's/enforcing/disabled/g' /etc/selinux/config /etc/selinux/config
+sudo systemctl stop firewalld || true
+sudo systemctl disable firewalld || true
+echo "global
+ log 127.0.0.1 local0
+ log 127.0.0.1 local1 notice
+ maxconn 4096
+ quiet
+ user haproxy
+ group haproxy
+defaults
+ log global
+ mode http
+ retries 3
+ timeout client 50s
+ timeout connect 5s
+ timeout server 50s
+ option dontlognull
+ option httplog
+ option redispatch
+ balance roundrobin
+# Set up application listeners here.
+listen admin
+ bind 127.0.0.1:22002
+ mode http
+ stats uri /
+frontend http
+ maxconn 2000
+ bind 0.0.0.0:80
+ default_backend servers-http
+backend servers-http" | sudo tee /etc/haproxy/haproxy.cfg
+hosts=$(echo "10.42.35.54 10.42.35.55" | tr "," "\n")
+port=80
+for host in $hosts
+  do echo " server host-${host} ${host}:${port} weight 1 maxconn 100 check" | sudo tee -a /etc/haproxy/haproxy.cfg
+done
+sudo systemctl daemon-reload
+sudo systemctl enable haproxy
+sudo systemctl restart haproxy
+
+chmod 777 haproxy.sh
+./haproxy.sh
+
+
+
+
+Update the background, Tab title and Title within the page
+
+
+/var/www/laravel/resources/views/layouts/app.blade.php
